@@ -255,21 +255,6 @@ async def draft_edit_field(cb: CallbackQuery, state: FSMContext):
     await cb.message.answer(f"✏️ Введите новое значение: {allowed[field]}")
     await cb.answer()
 
-@dp.message(NewOrder.edit_value)
-async def draft_edit_value(m: Message, state: FSMContext):
-    data=await state.get_data()
-    field=data.get("edit_field")
-    value=(m.text or "").strip()
-    if not value:
-        return await m.answer("Значение пустое. Введите ещё раз.")
-    if field=="phone" and len("".join(ch for ch in value if ch.isdigit())) < 9:
-        return await m.answer("Телефон выглядит некорректно. Введите не менее 9 цифр.")
-    if field=="fee" and not any(ch.isdigit() for ch in value):
-        return await m.answer("Стоимость должна содержать цифры.")
-    await state.update_data(**{field:value})
-    await state.set_state(NewOrder.review)
-    data=await state.get_data()
-    await m.answer(order_review_text(data), reply_markup=review_kb(), parse_mode="HTML")
 
 @dp.callback_query(F.data == "draftback")
 async def draft_back(cb: CallbackQuery, state: FSMContext):
@@ -449,7 +434,7 @@ async def back_cb(cb: CallbackQuery):
     await cb.answer()
 
 @dp.callback_query(F.data.startswith("cancel:"))
-async def cancel_cb(cb: Callback):
+async def cancel_cb(cb: CallbackQuery):
     if cb.from_user.id!=ADMIN_ID:
         return await cb.answer("Нет доступа",show_alert=True)
     oid=int(cb.data.split(":")[1])
@@ -639,5 +624,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
 
