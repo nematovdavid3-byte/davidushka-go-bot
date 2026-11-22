@@ -42,6 +42,7 @@ admin_menu = ReplyKeyboardMarkup(keyboard=[
 class NewOrder(StatesGroup):
     customer = State()
     phone = State()
+    sender_phone = State()
     pickup = State()
     destination = State()
     goods = State()
@@ -57,6 +58,9 @@ class CourierRegistration(StatesGroup):
     name = State()
     phone = State()
 
+class HelpRequest(StatesGroup):
+    message = State()
+
 def db():
     c = sqlite3.connect(DB_PATH, timeout=20)
     c.execute("PRAGMA journal_mode=WAL")
@@ -66,6 +70,8 @@ def db():
     order_cols = {x[1] for x in c.execute("PRAGMA table_info(orders)").fetchall()}
     if "payment_method" not in order_cols:
         c.execute("ALTER TABLE orders ADD COLUMN payment_method TEXT DEFAULT 'Не выбран'")
+    if "sender_phone" not in order_cols:
+        c.execute("ALTER TABLE orders ADD COLUMN sender_phone TEXT DEFAULT ''")
     c.execute("""CREATE TABLE IF NOT EXISTS couriers(
         telegram_id INTEGER PRIMARY KEY, name TEXT, phone TEXT, registered_at TEXT, online INTEGER DEFAULT 0)""")
     cols = {x[1] for x in c.execute("PRAGMA table_info(couriers)").fetchall()}
@@ -82,7 +88,7 @@ def get_order(oid):
 
 def fmt(r):
     shop = r[2] or "Частный заказ"
-    return (f"<b>DAVIDUSHKA GO | Заказ #{r[0]}</b>\n🏪 Заказчик: {shop}\n👤 Получатель: {r[3]}\n📞 Телефон: {r[4]}\n"
+    return (f"<b>DAVIDUSHKA GO | Заказ #{r[0]}</b>\n🏪 Заказчик: {shop}\n👤 Получатель: {r[3]}\n📞 Телефон получателя: {r[4]}\n📱 Телефон отправителя: {r[13] if len(r)>13 and r[13] else '—'}\n"
             f"📍 Забрать: {r[5]}\n🏁 Доставить: {r[6]}\n🛍️ Товар: {r[7]}\n💵 Доставка: {r[8] or 'Установит диспетчер'}\n💳 Оплата: {r[12] if len(r)>12 and r[12] else 'Не выбрана'}\n📌 Статус: {r[9]}")
 
 def role_menu(uid):
@@ -117,9 +123,13 @@ def courier_pick_kb(oid):
     buttons.append([InlineKeyboardButton(text="↩️ Назад", callback_data=f"back:{oid}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+def phone_request_kb():
+    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📲 Отправить мой номер", request_contact=True)], [KeyboardButton(text="✍️ Ввести номер вручную")], [KeyboardButton(text="❌ Отмена")]], resize_keyboard=True, one_time_keyboard=True)
+
 def client_order_kb(oid):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✏️ Исправить телефон", callback_data=f"editphone:{oid}")],
+        [InlineKeyboardButton(text="✏️ Телефон получателя", callback_data=f"editphone:{oid}")],
+        [InlineKeyboardButton(text="✏️ Телефон отправителя", callback_data=f"editsenderphone:{oid}")],
         [InlineKeyboardButton(text="✏️ Исправить адрес забора", callback_data=f"editpickup:{oid}")],
         [InlineKeyboardButton(text="✏️ Исправить адрес доставки", callback_data=f"editdest:{oid}")]
     ])
@@ -139,7 +149,7 @@ async def start_order_form(m, state):
 
 def order_review_text(d):
     return (f"🧾 <b>Проверьте заказ перед отправкой:</b>\n\n"
-            f"👤 Получатель: {d.get('customer','—')}\n📞 Телефон: {d.get('phone','—')}\n"
+            f"👤 Получатель: {d.get('customer','—')}\n📞 Телефон получателя: {d.get('phone','—')}\n📱 Телефон отправителя: {d.get('sender_phone','—')}\n"
             f"📍 Забрать: {d.get('pickup','—')}\n🏁 Доставить: {d.get('destination','—')}\n"
             f"🛍️ Товар: {d.get('goods','—')}\n💵 Доставка: устанавливает диспетчер\n💳 Оплата: {d.get('payment','—')}\n\nЕсли есть ошибка, нажмите «Изменить».")
 
@@ -168,17 +178,46 @@ async def start(m: Message, state: FSMContext):
 
 @dp.message(Command("help"))
 @dp.message(F.text == "ℹ️ Помощь")
-async def help_cmd(m: Message):
-    await m.answer("Заказ: 🛵 Заказать доставку. Курьер: 📦 Мои заказы. Диспетчер: меню управления заказами.",
-                   reply_markup=role_menu(m.from_user.id))
+async def help_cmd(m: Message, state: FSMContext):
+    await state.clear()
+    await state.set_state(HelpRequest.message)
+    await m.answer("ℹ️ DAVIDUSHKA GO — помощь\nНапишите вопрос или проблему одним сообщением. Диспетчер получит его, ответ придёт сюда. Для выхода нажмите «❌ Отмена».", reply_markup=client_menu)
 
 @dp.message(F.text == "☎️ Оператор")
-async def operator(m: Message):
-    await m.answer("Ваш запрос отправлен диспетчеру. Напишите вопрос следующим сообщением.")
+async def operator(m: Message, state: FSMContext):
+    await state.clear()
+    await state.set_state(HelpRequest.message)
+    await m.answer("☎️ Напишите сообщение диспетчеру. Ответ придёт в этот чат.", reply_markup=client_menu)
+
+@dp.message(HelpRequest.message)
+async def help_message(m: Message, state: FSMContext):
+    if not m.text or not m.text.strip():
+        return await m.answer("Напишите вопрос текстом.")
+    u=m.from_user
+    safe=u.full_name.replace("<","&lt;").replace(">","&gt;")
+    user_text=m.text.strip().replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+    message=f"🆘 <b>Поддержка DAVIDUSHKA GO</b>\n👤 {safe}\n🆔 <code>{u.id}</code>\n@{u.username or 'username не указан'}\n\n{user_text}"
     try:
-        await bot.send_message(ADMIN_ID, f"☎️ Клиент просит оператора: {m.from_user.full_name} (@{m.from_user.username or 'без username'})")
+        await bot.send_message(ADMIN_ID,message,parse_mode="HTML")
     except Exception:
-        log.exception("Could not notify admin")
+        log.exception("Support forwarding failed")
+        return await m.answer("Не удалось отправить обращение. Попробуйте позже.")
+    await state.clear()
+    await m.answer("✅ Обращение отправлено. Ответ придёт сюда в Telegram.",reply_markup=role_menu(u.id))
+
+@dp.message(Command("reply"))
+async def admin_reply(m: Message):
+    if m.from_user.id!=ADMIN_ID:
+        return await m.answer("Команда доступна диспетчеру.")
+    parts=(m.text or "").split(maxsplit=2)
+    if len(parts)<3 or not parts[1].isdigit():
+        return await m.answer("Формат: /reply TELEGRAM_ID текст")
+    try:
+        await bot.send_message(int(parts[1]),"💬 Ответ DAVIDUSHKA GO:\n"+parts[2])
+        await m.answer("✅ Ответ отправлен.")
+    except Exception:
+        log.exception("Reply failed")
+        await m.answer("❌ Не удалось отправить. Клиент должен запустить бота через /start.")
 
 @dp.message(F.text == "❌ Отмена")
 async def cancel_flow(m: Message, state: FSMContext):
@@ -196,7 +235,7 @@ async def customer(m: Message, state: FSMContext):
         return await m.answer("Введите имя получателя (не менее 2 символов).")
     await state.update_data(customer=m.text.strip())
     await state.set_state(NewOrder.phone)
-    await m.answer("📞 Телефон получателя (можно с +998):")
+    await m.answer("📞 Телефон получателя: отправьте контакт кнопкой или введите номер.", reply_markup=phone_request_kb())
 
 @dp.message(NewOrder.phone)
 async def phone(m: Message, state: FSMContext):
@@ -205,8 +244,19 @@ async def phone(m: Message, state: FSMContext):
     if len(digits) < 9:
         return await m.answer("❗ Введите корректный номер телефона (не менее 9 цифр). Попробуйте ещё раз.")
     await state.update_data(phone=value)
+    await state.set_state(NewOrder.sender_phone)
+    await m.answer("📱 Ваш телефон (отправителя): отправьте контакт или введите номер.", reply_markup=phone_request_kb())
+
+@dp.message(NewOrder.sender_phone)
+async def sender_phone(m: Message, state: FSMContext):
+    value=(m.contact.phone_number if m.contact else (m.text or "")).strip()
+    digits="".join(ch for ch in value if ch.isdigit())
+    if len(digits)<9:
+        return await m.answer("❗ Введите корректный телефон (9+ цифр) или отправьте контакт кнопкой.")
+    await state.update_data(sender_phone=value)
     await state.set_state(NewOrder.pickup)
-    await m.answer("📍 Адрес, откуда забрать:")
+    await m.answer("📍 Адрес, откуда забрать:", reply_markup=client_menu)
+
 
 @dp.message(NewOrder.pickup)
 async def pickup(m: Message, state: FSMContext):
@@ -244,7 +294,8 @@ async def payment_choice(cb: CallbackQuery, state: FSMContext):
     await state.update_data(payment=payment, fee="Установит диспетчер")
     data=await state.get_data()
     await state.set_state(NewOrder.review)
-    await cb.message.answer(order_review_text(data), reply_markup=review_kb(), parse_mode="HTML")
+    card_note = "\n\n💳 Карта для перевода: <code>5614 6822 1642 8294</code>\nПереводите только после подтверждения стоимости диспетчером." if payment == "Перевод на карту" else ""
+    await cb.message.answer(order_review_text(data)+card_note, reply_markup=review_kb(), parse_mode="HTML")
     await cb.answer("Способ оплаты выбран")
 
 
@@ -258,7 +309,7 @@ async def draft_edit_menu(cb: CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data.startswith("draftedit:"))
 async def draft_edit_field(cb: CallbackQuery, state: FSMContext):
     field=cb.data.split(":")[1]
-    allowed={"customer":"имя получателя","phone":"телефон","pickup":"адрес забора","destination":"адрес доставки","goods":"товар"}
+    allowed={"customer":"имя получателя","phone":"телефон получателя","sender_phone":"телефон отправителя","pickup":"адрес забора","destination":"адрес доставки","goods":"товар"}
     if field not in allowed:
         return await cb.answer("Поле не распознано.", show_alert=True)
     await state.update_data(edit_field=field)
@@ -286,13 +337,16 @@ async def order_confirm(cb: CallbackQuery, state: FSMContext):
         return await cb.answer("Черновик заказа не найден.", show_alert=True)
     d=await state.get_data()
     c=db()
-    cur=c.execute("INSERT INTO orders(shop_user_id,shop_name,customer,phone,pickup,destination,goods,fee,status,created_at,payment_method) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-        (cb.from_user.id,None,d["customer"],d["phone"],d["pickup"],d["destination"],d["goods"],"Установит диспетчер","NEW",datetime.now().isoformat(timespec="minutes"),d.get("payment","Не выбрана")))
+    cur=c.execute("INSERT INTO orders(shop_user_id,shop_name,customer,phone,pickup,destination,goods,fee,status,created_at,payment_method,sender_phone) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        (cb.from_user.id,None,d["customer"],d["phone"],d["pickup"],d["destination"],d["goods"],"Установит диспетчер","NEW",datetime.now().isoformat(timespec="minutes"),d.get("payment","Не выбрана"),d.get("sender_phone","")))
     oid=cur.lastrowid
     c.commit()
     c.close()
     r=get_order(oid)
-    await cb.message.edit_text(f"✅ Заказ #{oid} принят! Диспетчер скоро назначит курьера.")
+    confirm_text=f"✅ Заказ #{oid} принят! Диспетчер проверит адрес и установит стоимость.\n\nОплата: {d.get('payment','—')}"
+    if d.get("payment")=="Перевод на карту":
+        confirm_text += "\n💳 Карта: 5614 6822 1642 8294\nНе переводите до подтверждения цены."
+    await cb.message.edit_text(confirm_text)
     await bot.send_message(ADMIN_ID,fmt(r),reply_markup=admin_order_kb(oid),parse_mode="HTML")
     await state.clear()
     await cb.answer("Заказ создан")
@@ -316,7 +370,7 @@ async def courier_name(m: Message, state: FSMContext):
         return await m.answer("Введите имя (не менее 2 символов).")
     await state.update_data(cname=value)
     await state.set_state(CourierRegistration.phone)
-    await m.answer("📱 Введите телефон курьера (9+ цифр, или /cancel):")
+    await m.answer("📱 Отправьте контакт кнопкой или введите телефон курьера (9+ цифр, /cancel):", reply_markup=phone_request_kb())
 
 @dp.message(CourierRegistration.phone)
 async def courier_phone(m: Message, state: FSMContext):
@@ -525,6 +579,11 @@ async def edit_phone_cb(cb: CallbackQuery, state: FSMContext):
     oid=int(cb.data.split(":")[1])
     await customer_edit_prompt(cb,state,oid,"phone","телефон получателя")
 
+@dp.callback_query(F.data.startswith("editsenderphone:"))
+async def edit_sender_phone_cb(cb: CallbackQuery, state: FSMContext):
+    oid=int(cb.data.split(":")[1])
+    await customer_edit_prompt(cb,state,oid,"sender_phone","телефон отправителя")
+
 @dp.callback_query(F.data.startswith("editpickup:"))
 async def edit_pickup_cb(cb: CallbackQuery, state: FSMContext):
     oid=int(cb.data.split(":")[1])
@@ -544,9 +603,9 @@ async def edit_value_handler(m: Message, state: FSMContext):
         oid=int(d["edit_order_id"])
         if not value:
             return await m.answer("Пустое значение. Введите исправление.")
-        if field=="phone" and len("".join(x for x in value if x.isdigit()))<9:
+        if field in ("phone","sender_phone") and len("".join(x for x in value if x.isdigit()))<9:
             return await m.answer("Введите корректный телефон (9+ цифр).")
-        if field not in ("phone","pickup","destination"):
+        if field not in ("phone","sender_phone","pickup","destination"):
             return await m.answer("Поле не разрешено редактировать.")
         c=db()
         cur=c.execute(f"UPDATE orders SET {field}=? WHERE id=? AND shop_user_id=? AND status='NEW'",(value,oid,m.from_user.id))
@@ -562,12 +621,12 @@ async def edit_value_handler(m: Message, state: FSMContext):
         return
     # Editing the draft before submit
     field=d.get("edit_field")
-    if field not in ("customer","phone","pickup","destination","goods"):
+    if field not in ("customer","phone","sender_phone","pickup","destination","goods"):
         await state.clear()
         return await m.answer("Сессия редактирования не найдена. Создайте заказ заново.",reply_markup=role_menu(m.from_user.id))
     if not value:
         return await m.answer("Значение пустое. Введите ещё раз.")
-    if field=="phone" and len("".join(ch for ch in value if ch.isdigit()))<9:
+    if field in ("phone","sender_phone") and len("".join(ch for ch in value if ch.isdigit()))<9:
         return await m.answer("Телефон выглядит некорректно. Введите не менее 9 цифр.")
     await state.update_data(**{field:value})
     await state.set_state(NewOrder.review)
