@@ -201,7 +201,7 @@ async def back_cb(cb: CallbackQuery):
     if r: await cb.message.edit_text(fmt(r),reply_markup=admin_order_kb(oid),parse_mode="HTML")
     await cb.answer()
 @dp.callback_query(F.data.startswith("cancel:"))
-async def cancel_cb(cb: Callback):
+async def cancel_cb(cb:CallbackQuery):
     if cb.from_user.id!=ADMIN_ID: return await cb.answer("Нет доступа",show_alert=True)
     oid=int(cb.data.split(":")[1]); c=db(); cur=c.execute("UPDATE orders SET status='CANCELLED' WHERE id=? AND status IN ('NEW','ASSIGNED')",(oid,)); c.commit(); c.close()
     if cur.rowcount:
